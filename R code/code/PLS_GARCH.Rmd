@@ -279,7 +279,7 @@ sGARCH_pls
 
 ```{r}
 # In-sample MSE
-sprintf("In-sample MSE is %f",mean((sGARCH_pls@fit$residuals*sd(R_train))^2))
+sprintf("In-sample MSE is %g",mean((sGARCH_pls@fit$residuals*sd(R_train))^2))
 ```
 
 ```{r}
@@ -287,8 +287,8 @@ sprintf("In-sample MSE is %f",mean((sGARCH_pls@fit$residuals*sd(R_train))^2))
 forecast_sGARCH_pls<-ugarchforecast(sGARCH_pls, data = R_pls, n.ahead = 1, n.roll = N_test,out.sample =N_test)
 sigma_sGARCH_pls<-sigma(forecast_sGARCH_pls)
 fitted_sGARCH_pls<-fitted(forecast_sGARCH_pls)
-sprintf("Out-of-sample MSE is %f",mean(((t(fitted_sGARCH_pls)-R_pls[(length(R_pls)-N_test):length(R_pls)])*sd(R_train))^2))
-sprintf("Out-of-sample mean of sd is %f",mean(sigma_sGARCH_pls))
+sprintf("Out-of-sample MSE is %g",mean(((t(fitted_sGARCH_pls)-R_pls[(length(R_pls)-N_test):length(R_pls)])*sd(R_train))^2))
+sprintf("Out-of-sample mean of sd is %g",mean(sigma_sGARCH_pls))
 ```
 
 ```{r}
@@ -563,7 +563,7 @@ Next, we try the eGARCH model with ged distribution. The in-sample MSE is 0.0001
 
 ```{r}
 # Create lag terms for PLS with R^2
-lags <- 1
+lags <- 2
 N_train <- nrow(V_norm2)
 
 X_pls_2_all <- V_norm2[(lags+1):N_train,]
@@ -584,7 +584,7 @@ R_pls2 <- R_pls[(lags+1):N_train]
 
 # GARCH
 spec.eGARCH_pls2 <- ugarchspec(variance.model=list(model="eGARCH",
-                    garchOrder=c(1,1),external.regressors = as.matrix(X_pls_2_all[,1:5])), 
+                    garchOrder=c(2,2),external.regressors = as.matrix(X_pls_2_all[,1:5])), 
                     mean.model=list(armaOrder = c(1,1),include.mean=FALSE,external.regressors =
                                       as.matrix(X_pls_1_all)), distribution.model="ged")
 eGARCH_pls2 <- ugarchfit(R_pls2, spec=spec.eGARCH_pls2,out.sample=N_test)
@@ -627,7 +627,7 @@ report(roll_GARCH_pls2, type="VaR", VaR.alpha = 0.05, conf.level = 0.95)
 Next, we use gjrGARCH with std distribution. The in-sample MSE is 0.0001839, while the out-of-sample MSE is 0.0001189. The residuals are independent, and the model passes the coverage test. The main problem of this model is that the coefficients of latent factors in variance model is insignificant.
 
 ```{r}
-lags <- 2
+lags <- 1
 N_train <- nrow(V_norm2)
 
 X_pls_2_all <- V_norm2[(lags+1):N_train,]
@@ -649,7 +649,7 @@ R_pls2 <- R_pls[(lags+1):N_train]
 
 # GARCH
 spec.gjrGARCH_pls2 <- ugarchspec(variance.model=list(model="gjrGARCH",
-                            garchOrder=c(1,1),external.regressors = as.matrix(X_pls_2_all[,1:5])), 
+                            garchOrder=c(0,1),external.regressors = as.matrix(X_pls_2_all)), 
                             mean.model=list(armaOrder = c(1,1),include.mean=FALSE,
                                             external.regressors = 
                                               as.matrix(X_pls_1_all)), 
