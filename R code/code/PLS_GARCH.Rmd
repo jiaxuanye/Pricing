@@ -2,6 +2,8 @@
 title: "PLS_GARCH"
 output: pdf_document
 date: "2023-01-23"
+editor_options: 
+  chunk_output_type: inline
 ---
 
 ```{r setup, include=FALSE}
@@ -990,13 +992,6 @@ sprintf('In-sample MSE is %g',mean((sGARCH@fit$residuals*sd(R_train))^2))
 ```
 
 ```{r}
-plot(R[(length(R)-N_test):length(R)],type='l')
-lines(t(fitted_GARCH1)*sd(R_train)+mean(R_train),col='blue')
-lines(t(fitted_GARCH1)*sd(R_train)+mean(R_train)+1.96*t(sigma_GARCH1)*sd(R_train),col='green')
-lines(t(fitted_GARCH1)*sd(R_train)+mean(R_train)-1.96*t(sigma_GARCH1)*sd(R_train),col='green')
-```
-
-```{r}
 # Out-of-sample
 forecast_GARCH1<-ugarchforecast(sGARCH, data = R_co, n.ahead = 1, n.roll = N_test,out.sample =N_test)
 sigma_GARCH1<-sigma(forecast_GARCH1)
@@ -1004,6 +999,13 @@ fitted_GARCH1<-fitted(forecast_GARCH1)
 
 sprintf('Out-of-sample MSE is %g',mean((t(fitted_GARCH1)*sd(R_train)+mean(R_train)-R[(length(R)-N_test):length(R)])^2))
 sprintf('Out-of-sample mean of sd is %g',mean(sigma_GARCH1))
+```
+
+```{r}
+plot(R[(length(R)-N_test):length(R)],type='l')
+lines(t(fitted_GARCH1)*sd(R_train)+mean(R_train),col='blue')
+lines(t(fitted_GARCH1)*sd(R_train)+mean(R_train)+1.96*t(sigma_GARCH1)*sd(R_train),col='green')
+lines(t(fitted_GARCH1)*sd(R_train)+mean(R_train)-1.96*t(sigma_GARCH1)*sd(R_train),col='green')
 ```
 
 ```{r}
