@@ -1,0 +1,1162 @@
+---
+title: "PLS_GARCH"
+output: pdf_document
+date: "2023-01-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Implied Volatility vs. Call Price Surface
+
+```{r}
+rm(list=ls())
+library(pls)
+library(forecast)
+library(car)
+library(tseries)
+library(rugarch)
+library(Dowd)
+library(moments)
+
+# Import data
+Data_impvol <- read.csv("/Users/benjye/Dropbox/Pricing/Data_R/Data_impvol.csv",
+                     header=TRUE, stringsAsFactors = FALSE)
+
+S_all <- Data_impvol[,1]
+imp_all <- Data_impvol[,-c(1)]
+
+# Start from 2009
+start <- 1767
+R_all <- diff(log(S_all))
+R_all <- R_all[-1]
+R_all <- R_all[start:length(R_all)]
+R_sq_all <- R_all^2
+imp_all <- imp_all[-c(1),]
+imp_all <- imp_all[start:nrow(imp_all),]
+
+# Split data and normalize it
+N_test <- 1000
+R_train <- R_all[1:(length(R_all)-N_test)]
+imp_train <- imp_all[1:(length(R_all)-N_test),]
+R_test <- R_all[(length(R_all)-N_test+1):length(R_all)]
+imp_test <- imp_all[(length(R_all)-N_test+1):length(R_all),]
+
+train_data <- cbind(R_train,imp_train)
+test_data <- cbind(R_test,imp_test)
+train_data <- scale(train_data,center=TRUE,scale=TRUE)
+```
+
+The implied volatility is not normal, but the $\chi^2$ test of Jarque Bera test, including the skewness and kurtosis is still better than the call price surface. Thus, IV is used for the following models.
+
+```{r}
+# IV data
+imp_train_norm <- scale(imp_train,center=TRUE,scale=TRUE)
+
+# Test whether the IV data is normal or not
+Num_obs <- 10
+qqnorm(imp_train_norm[,Num_obs],ylim=c(-3,3))
+qqline(imp_train_norm[,Num_obs],lwd = 2)
+hist(imp_train_norm[,Num_obs])
+```
+
+```{r}
+# Jarque Bera test for normality
+jarque.bera.test(imp_train_norm[,Num_obs])
+
+# Find skewness and kurtosis
+skew_imp <- apply(imp_train_norm,2,skewness)
+kurt_imp <- apply(imp_train_norm,2,kurtosis)
+sprintf('Mean of skewness (IV) is %f',mean(skew_imp))
+sprintf('Mean of kurtosis (IV) is %f',mean(kurt_imp))
+```
+
+```{r}
+# Import call price surface data
+Data_all_cs <- read.csv("/Users/benjye/Dropbox/Pricing/Data_R/Date_all.csv",
+                     header=FALSE, stringsAsFactors = FALSE)
+start <- 1767
+Date_all_cs <- Data_all_cs[start:nrow(Data_all_cs),1]
+S_all_cs <- Data_all_cs[start:nrow(Data_all_cs),2]
+cs_all <- Data_all_cs[start:nrow(Data_all_cs),-c(1,2)]
+
+R_all_cs <- diff(log(S_all_cs))
+R_all_cs <- R_all_cs[-1]
+cs_all <- cs_all[2:nrow(cs_all),]
+
+N_test <- 1000
+R_train_cs <- R_all_cs[1:(length(R_all_cs)-N_test)]
+cs_train <- cs_all[1:(length(R_all_cs)-N_test),]
+R_test_cs <- R_all_cs[(length(R_all_cs)-N_test+1):length(R_all_cs)]
+cs_test <- cs_all[(length(R_all_cs)-N_test+1):length(R_all_cs),]
+
+
+cs_train_norm <- scale(cs_train,center=TRUE,scale=TRUE)
+qqnorm(cs_train_norm[,Num_obs],ylim=c(-3,3))
+qqline(cs_train_norm[,Num_obs],lwd = 2)
+hist(cs_train_norm[,Num_obs])
+```
+
+```{r}
+# Jarque Bera test, skewness and kurtosis from call price surface
+jarque.bera.test(cs_train_norm[,Num_obs])
+skew_cs <- apply(cs_train_norm,2,skewness)
+kurt_cs <- apply(cs_train_norm,2,kurtosis)
+sprintf('Mean of skewness (CS) is %f',mean(skew_cs))
+sprintf('Mean of kurtosis (CS) is %f',mean(kurt_cs))
+```
+
+```{r}
+# Difference between chi^2 test of IV and CS
+jb_imp <- c()
+jb_cs <- c()
+for(i in 1:130){
+  jb_imp <- rbind(jb_imp,jarque.bera.test(imp_train_norm[,i])$statistic)
+  jb_cs <- rbind(jb_cs,jarque.bera.test(cs_train_norm[,i])$statistic)
+}
+sprintf('Difference between chi^2 test of IV and CS is %f',mean(jb_imp-jb_cs))
+```
+
+Using Augmented Dickey Fuller test, we conclude that the series are stationary under 90% confidence.
+
+```{r}
+# ADF test for IV training data
+pval <- sapply(1:130,function(x) adf.test(imp_train[,x])$p.value) # p-value from ADF
+pval[which.max(pval)]
+```
+
+```{r}
+# Plot the most unstationary series
+plot(imp_train[,which.max(pval)],type='l')
+```
+
+We fit PLS model for $R$, and by selecting the lowest MSE, 1 component is the best result. However, in scale factors, the third component in 3-component model contains the most information compared to PCR. Thus, we use the optimal component as 3.
+
+```{r}
+# Fit PLS model on R
+fit <- plsr(formula = R_train~., data=data.frame(train_data), rescale = F, validation="CV",segment.type=c("consecutive"))
+
+fit.cv <- pls::crossval(fit, segments = 10,segment.type = c("consecutive"))
+mse_pls <- MSEP(fit.cv)
+
+plot(c(1:20),mse_pls$val[2,1,2:21],'l',xlab='Number of Components',ylab='MSE'
+     ,main='MSE vs number of components')
+
+# Find the number of components with minimum MSE
+which.min(mse_pls$val[2,1,])
+```
+
+```{r}
+# Plot scale factors for PLS of R
+V <- t(as.matrix(train_data[,2:ncol(train_data)])) %*% 
+  as.matrix(train_data[,2:ncol(train_data)]) 
+e <- eigen(V)
+alpha <- apply(diag(train_data[,1]) %*% 
+                as.matrix(train_data[,2:ncol(train_data)]) %*% e$vectors, 2, mean) / e$values
+#K: component numbers
+f_PLS_1 <- c()
+for(K in 1:5){
+  w <- sapply(1:K, function(k) sum(alpha^2*e$values^(k+1)))
+  W <- matrix(0, K, K)
+  for(l in 1:K)
+  {
+    W[,l] <- sapply(1:K, function(k) sum(alpha^2*e$values^(k+l+1)))
+  }
+  beta <- solve(W, w,tol = 1e-200)
+  temp <- sapply(1:130, function(j) sum(beta*(e$values[j])^(1:K)))
+  f_PLS_1 <- rbind(f_PLS_1,temp)
+}
+
+par(mfrow=c(2,2))
+dev.off()
+ms <- c(0.947,0.960,0.971,0.979,0.987,0.995,1.001,1.007,1.014,1.021)
+plot(1:10,f_PLS_1[1,1:10],'l',xlab='ms',ylab='scale factor',ylim=c(-5,5),main='scale factor (tau = 0.082)',col='black',xaxt = "n")
+lines(f_PLS_1[2,1:10],col='blue')
+lines(f_PLS_1[3,1:10],col='green')
+lines(f_PLS_1[4,1:10],col='red')
+lines(f_PLS_1[5,1:10],col='brown')
+abline(h=1,lty='dashed')
+legend('bottomright',lty = c(1,1,1,1,1),legend=c("1 component", "2 components","3 components","4 components","5 components"), col = c("black","blue","green","red","brown"))
+axis(1,at=1:10,label=ms)
+```
+
+The 3rd component has large value when the return $R$ has large volatility, and thus, a better capture of the return behavior.
+
+```{r}
+# Plot the 3rd component in the training IV
+plot(train_data[,4],type='l',xlab='Date',ylab='3rd IV')
+```
+
+```{r}
+# plot the return
+plot(train_data[,1],type='l',xlab='Date',ylab='R')
+```
+
+```{r}
+# Fit PLS of 3 comp
+N_comp <- 3
+fit_new <- plsr(formula = R_train~., data=data.frame(train_data),ncomp=N_comp, rescale = F, validation="CV",segment.type=c("consecutive"))
+
+# Find PLS factor of training data
+V_pls_train <- as.matrix(fit_new$scores)%*%diag(N_comp)
+
+# Find PLS factor of test data
+P_pls <- fit_new$projection
+
+## Normalize test data
+imp_norm <- (imp_test - t(t(rep(1,nrow(imp_test))))%*%t(apply(imp_train,2,mean)))/(t(t(rep(1,nrow(imp_test))))%*%t(apply(imp_train,2,sd)))
+imp_norm <- imp_norm-rep(1,dim(imp_norm)[1])%*%t(fit_new$Xmeans)
+
+V_pls_test <- as.matrix(imp_norm)%*%as.matrix(P_pls)
+```
+
+The PLS factor in training data is in general stationary, except factor 2.
+
+```{r}
+# Decide whether the PLS factors are stationary or not
+for(i in 1:N_comp){
+  print(adf.test(V_pls_train[,i]))
+}
+```
+
+```{r}
+# Plot the training PLS factor
+for(i in 1:N_comp){
+  plot(V_pls_train[,i],type='l',xlab='Date',ylab=paste0("PLS factor ",i))
+}
+```
+
+```{r}
+# Normalize PLS factors in training and test data
+V_train_norm <- scale(V_pls_train,center=TRUE,scale=TRUE)
+V_test_norm <- (V_pls_test - t(t(rep(1,nrow(V_pls_test))))%*%t(apply(V_pls_train,2,mean)))/(t(t(rep(1,nrow(V_pls_test))))%*%t(apply(V_pls_train,2,sd)))
+
+# Combine traing and test data
+V_norm <- rbind(V_train_norm,V_test_norm)
+```
+
+However, the normalized training + test data is stationary according to ADF test.
+
+```{r}
+# Plot the normalized PLS factor (training+test)
+for(i in 1:N_comp){
+  plot(V_norm[,i],type='l',xlab='Date',ylab=paste0("PLS factor ",i))
+}
+```
+
+```{r}
+# ADF test for training+test data
+adf.test(V_norm[,1],k=10)
+adf.test(V_norm[,2],k=10)
+adf.test(V_norm[,3],k=10)
+```
+
+```{r}
+# Prepare R with normalized training + test data
+R_train_norm <- scale(R_train,center=TRUE,scale=TRUE)
+R_test_norm <- (R_test-mean(R_train))/sd(R_train)
+R_pls <- c(R_train_norm,R_test_norm)
+```
+
+```{r}
+Acf(R_pls)
+Pacf(R_pls)
+```
+
+First, the base model is ARMA(0,0)+GARCH(0,1) with external factors as the normalized PLS factors. The coefficients of PLS factors are all insignificant. In-sample MSE is 0.0001836, while out-of-sample MSE is 0.000137. The residuals are independent and heteroscedastic, but not normal. It passes the coverage test with the exceed of 6.2%.
+
+```{r}
+# GARCH model with PLS factors of R
+spec.sGARCH_pls <- ugarchspec(variance.model=list(model="sGARCH", 
+                            garchOrder=c(0,1),external.regressors = as.matrix(V_norm)), 
+                            mean.model=list(armaOrder = c(0,0),include.mean=TRUE,
+                                            external.regressors = as.matrix(V_norm)), 
+                            distribution.model="norm")
+sGARCH_pls <- ugarchfit(R_pls, spec=spec.sGARCH_pls,out.sample=N_test)
+sGARCH_pls
+```
+
+```{r}
+# In-sample MSE
+sprintf("In-sample MSE is %f",mean((sGARCH_pls@fit$residuals*sd(R_train))^2))
+```
+
+```{r}
+# Out-of-sample
+forecast_sGARCH_pls<-ugarchforecast(sGARCH_pls, data = R_pls, n.ahead = 1, n.roll = N_test,out.sample =N_test)
+sigma_sGARCH_pls<-sigma(forecast_sGARCH_pls)
+fitted_sGARCH_pls<-fitted(forecast_sGARCH_pls)
+sprintf("Out-of-sample MSE is %f",mean(((t(fitted_sGARCH_pls)-R_pls[(length(R_pls)-N_test):length(R_pls)])*sd(R_train))^2))
+sprintf("Out-of-sample mean of sd is %f",mean(sigma_sGARCH_pls))
+```
+
+```{r}
+# 95% CI
+plot(R_all[(length(R_all)-N_test):length(R_all)],type='l',xlab='Date',ylab='Return',main="Out-of-sample")
+lines(t(fitted_sGARCH_pls)*sd(R_train)+mean(R_train),col='blue')
+lines(t(fitted_sGARCH_pls)*sd(R_train)+mean(R_train)+1.96*t(sigma_sGARCH_pls)*sd(R_train),col='green')
+lines(t(fitted_sGARCH_pls)*sd(R_train)+mean(R_train)-1.96*t(sigma_sGARCH_pls)*sd(R_train),col='green')
+```
+
+```{r}
+# QQplot, Normality test
+qqnorm(sGARCH_pls@fit$residuals)
+qqline(sGARCH_pls@fit$residuals,lwd = 2)
+jarque.bera.test(sGARCH_pls@fit$residuals)
+
+# Autocorrelation test, heteroscedasticity
+Box.test(sGARCH_pls@fit$residuals, lag = 10, type = "Ljung")
+Box.test(sGARCH_pls@fit$residuals^2, lag = 10, type = "Ljung")
+```
+
+```{r}
+# Coverage test
+roll_sGARCH_pls<-ugarchroll(spec=spec.sGARCH_pls, data=R_pls, n.ahead=1, forecast.length=N_test, refit.every=253, solver='hybrid', fit.control = list(stationarity = 1), calculate.VaR=TRUE, VaR.alpha=0.05, keep.coef=TRUE)
+report(roll_sGARCH_pls, type="VaR", VaR.alpha = 0.05, conf.level = 0.95) 
+```
+
+Next, the external regressors include the lagged terms of the latent factors.
+
+```{r}
+# Create lag terms
+N_train <- nrow(V_norm)
+lags <- 2
+X_train_new <- V_norm[(lags+1):N_train,]
+for(i in 1:lags){
+  if(lags==0){
+    break
+  }else{
+    temp <- V_norm[(lags+1-i):(N_train-i),]
+    X_train_new <- cbind(X_train_new,temp)
+  }
+}
+
+R_pls1 <- R_pls[(lags+1):N_train]
+
+
+# eGARCH
+spec.eGARCH_pls <- ugarchspec(variance.model=list(model="eGARCH", 
+                            garchOrder=c(2,2),external.regressors = as.matrix(X_train_new)), 
+                            mean.model=list(armaOrder = c(1,1),include.mean=FALSE,
+                                            external.regressors = as.matrix(X_train_new)), 
+                            distribution.model="ged")
+eGARCH_pls <- ugarchfit(R_pls1, spec=spec.eGARCH_pls,out.sample=N_test)
+eGARCH_pls
+```
+
+```{r}
+# In-sample MSE
+sprintf('In-sample MSE is %g',mean((eGARCH_pls@fit$residuals*sd(R_train))^2))
+```
+
+```{r}
+# Out-of-sample
+forecast_eGARCH_pls<-ugarchforecast(eGARCH_pls, data = R_pls1, n.ahead = 1, n.roll = N_test,out.sample =N_test)
+sigma_eGARCH_pls<-sigma(forecast_eGARCH_pls)
+fitted_eGARCH_pls<-fitted(forecast_eGARCH_pls)
+sprintf('Out-of-sample MSE is %g',mean(((t(fitted_eGARCH_pls)-R_pls1[(length(R_pls1)-N_test):length(R_pls1)])*sd(R_train))^2))
+sprintf('Out-of-sample mean of sd is %g',mean(sigma_eGARCH_pls))
+```
+
+```{r}
+# 95% CI
+plot(R_pls1[(length(R_pls1)-N_test):length(R_pls1)]*sd(R_train)+mean(R_train),type='l',ylab='Return',xlab='Date')
+lines(t(fitted_eGARCH_pls)*sd(R_train)+mean(R_train),col='blue')
+lines(t(fitted_eGARCH_pls)*sd(R_train)+mean(R_train)+1.96*t(sigma_eGARCH_pls)*sd(R_train),col='green')
+lines(t(fitted_eGARCH_pls)*sd(R_train)+mean(R_train)-1.96*t(sigma_eGARCH_pls)*sd(R_train),col='green')
+```
+
+```{r}
+# Coverage Test
+roll_GARCH_pls<-ugarchroll(spec=spec.eGARCH_pls, data=R_pls1, n.ahead=1, forecast.length=N_test, refit.every=253, solver='hybrid', fit.control = list(stationarity = 1), calculate.VaR=TRUE, VaR.alpha=0.05, keep.coef=TRUE)
+report(roll_GARCH_pls, type="VaR", VaR.alpha = 0.05, conf.level = 0.95) 
+```
+
+```{r}
+# Autocorrelation and heteroscedasticity
+Box.test(eGARCH_pls@fit$residuals, lag = 10, type = "Ljung")
+Box.test(eGARCH_pls@fit$residuals^2, lag = 10, type = "Ljung")
+```
+
+Based on MSE from cross-validation, the optimal number of PLS factors on $R^2$ is 2. However, the scale factors show that 5 components give more information than PCA.
+
+```{r}
+# PLS on R^2
+R_sq_train <- R_train^2
+R_sq_test <- R_test^2
+train_data_2 <- cbind(R_sq_train,imp_train)
+test_data_2 <- cbind(R_sq_test,imp_test)
+train_data_2 <- scale(train_data_2,center=TRUE,scale=TRUE)
+
+fit2 <- plsr(formula = R_sq_train~., data=data.frame(train_data_2), rescale = F, validation="CV",segment.type=c("consecutive"))
+
+fit2.cv <- pls::crossval(fit2, segments = 5,segment.type = c("consecutive"))
+mse_pls2 <- MSEP(fit2.cv)
+plot(c(1:20),mse_pls2$val[2,1,2:21],'l',xlab='Number of Components',ylab='MSE'
+     ,main='MSE vs number of components')
+which.min(mse_pls2$val[2,1,])
+```
+
+```{r}
+V <- t(as.matrix(train_data_2[,2:ncol(train_data_2)])) %*% 
+  as.matrix(train_data_2[,2:ncol(train_data_2)]) 
+e <- eigen(V)
+par(mfrow=c(2,2))
+alpha <- apply(diag(train_data_2[,1]) %*% 
+                as.matrix(train_data_2[,2:ncol(train_data_2)]) %*% e$vectors, 2, mean) / e$values
+#K: component numbers
+f_PLS_2 <- c()
+for(K in 2:6){
+  w <- sapply(1:K, function(k) sum(alpha^2*e$values^(k+1)))
+  W <- matrix(0, K, K)
+  for(l in 1:K)
+  {
+    W[,l] <- sapply(1:K, function(k) sum(alpha^2*e$values^(k+l+1)))
+  }
+  beta <- solve(W, w,tol = 1e-200)
+  temp <- sapply(1:130, function(j) sum(beta*(e$values[j])^(1:K)))
+  f_PLS_2 <- rbind(f_PLS_2,temp)
+}
+```
+
+```{r}
+ms <- c(0.947,0.960,0.971,0.979,0.987,0.995,1.001,1.007,1.014,1.021,1.027)
+plot(1:11,f_PLS_2[1,1:11],'l',xlab='ms',ylab='scale factor',ylim=c(-2,14),main='scale factor (tau = 0.082)',col='black',xaxt = "n")
+lines(f_PLS_2[2,1:11],col='blue')
+lines(f_PLS_2[3,1:11],col='green')
+lines(f_PLS_2[4,1:11],col='red')
+lines(f_PLS_2[5,1:11],col='brown')
+abline(h=1,lty='dashed')
+legend('topright',lty = c(1,1,1,1,1),legend=c("2 components","3 components","4 components","5 components","6 component"), col = c("black","blue","green",'red','brown'))
+axis(1,at=1:11,label=ms)
+```
+
+PLS factors are all stationary for training + test data. First, we try the optimal component as 2.
+
+```{r}
+# PLS with R^2 
+N_comp <- 2
+fit_new2 <- plsr(formula = R_sq_train~., data=data.frame(train_data_2),ncomp=N_comp, rescale = F, validation="CV",segment.type=c("consecutive"))
+
+V_pls_train2 <- as.matrix(fit_new2$scores)%*%diag(N_comp)
+
+# Find test factors
+P_pls2 <- fit_new2$projection
+imp_norm <- (imp_test - t(t(rep(1,nrow(imp_test))))%*%t(apply(imp_train,2,mean)))/(t(t(rep(1,nrow(imp_test))))%*%t(apply(imp_train,2,sd)))
+imp_norm <- imp_norm-rep(1,dim(imp_norm)[1])%*%t(fit_new2$Xmeans)
+V_pls_test2 <- as.matrix(imp_norm)%*%as.matrix(P_pls2)
+
+# Normalize factors
+V_norm_train2 <- scale(V_pls_train2,scale=TRUE,center=TRUE)
+V_norm_test2 <- (V_pls_test2-t(t(rep(1,nrow(V_pls_test2))))%*%t(apply(V_pls_train2,2,mean)))/(t(t(rep(1,nrow(V_pls_test2))))%*%t(apply(V_pls_train2,2,sd)))
+
+# Combine training and test
+V_norm2 <- rbind(V_norm_train2,V_norm_test2)
+```
+
+```{r}
+# Create lag terms for PLS with R^2
+lags <- 2
+N_train <- nrow(V_norm2)
+
+X_pls_2_all <- V_norm2[(lags+1):N_train,]
+X_pls_1_all <- V_norm[(lags+1):N_train,]
+for(i in 1:lags){
+  if(lags==0){
+    break
+  }else{
+    temp <- V_norm2[(lags+1-i):(N_train-i),]
+    temp2 <- V_norm[(lags+1-i):(N_train-i),]
+    X_pls_2_all <- cbind(X_pls_2_all,temp)
+    X_pls_1_all <- cbind(X_pls_1_all,temp2)
+  }
+}
+
+R_pls2 <- R_pls[(lags+1):N_train]
+
+
+# GARCH
+spec.eGARCH_pls2l <- ugarchspec(variance.model=list(model="eGARCH",
+                    garchOrder=c(2,2),external.regressors = as.matrix(X_pls_2_all)), 
+                    mean.model=list(armaOrder = c(1,1),include.mean=FALSE,external.regressors =
+                                      as.matrix(X_pls_2_all)), distribution.model="std")
+eGARCH_pls2l <- ugarchfit(R_pls2, spec=spec.eGARCH_pls2l,out.sample=N_test)
+eGARCH_pls2l
+```
+
+```{r}
+# In-sample MSE
+sprintf('In-sample MSE is %g',mean((eGARCH_pls2l@fit$residuals*sd(R_train))^2))
+```
+
+```{r}
+# Out-of-sample
+forecast_eGARCH_pls2l <-ugarchforecast(eGARCH_pls2l, data = R_pls2, n.ahead = 1, n.roll = N_test,out.sample =N_test)
+sigma_eGARCH_pls2l<-sigma(forecast_eGARCH_pls2l)
+fitted_eGARCH_pls2l<-fitted(forecast_eGARCH_pls2l)
+sprintf('Out-of-sample MSE is %g',mean(((t(fitted_eGARCH_pls2l)-R_pls2[(length(R_pls2)-N_test):length(R_pls2)])*sd(R_train))^2))
+sprintf('Out-of-sample mean of sd is %g',mean(sigma_eGARCH_pls2l))
+```
+
+```{r}
+plot(R_all[(length(R_all)-N_test):length(R_all)],type='l',xlab='Date',ylab='Return')
+lines(t(fitted_eGARCH_pls2l)*sd(R_train)+mean(R_train),col='blue')
+lines(t(fitted_eGARCH_pls2l)*sd(R_train)+mean(R_train)+1.96*t(sigma_eGARCH_pls2l)*sd(R_train),col='green')
+lines(t(fitted_eGARCH_pls2l)*sd(R_train)+mean(R_train)-1.96*t(sigma_eGARCH_pls2l)*sd(R_train),col='green')
+```
+
+```{r}
+# Autocorrelaiton and heteroscedasticity for residuals
+TQQPlot(eGARCH_pls2l@fit$residuals, 9)
+Box.test(eGARCH_pls2l@fit$residuals, lag = 10, type = "Ljung")
+Box.test(eGARCH_pls2l@fit$residuals^2, lag = 10, type = "Ljung")
+```
+
+```{r}
+# Coverage test
+roll_GARCH_pls2l <-ugarchroll(spec=spec.eGARCH_pls2l, data=R_pls2, n.ahead=1, forecast.length=N_test, refit.every=253, solver='hybrid', fit.control = list(stationarity = 1), calculate.VaR=TRUE, VaR.alpha=0.05, keep.coef=TRUE)
+report(roll_GARCH_pls2l, type="VaR", VaR.alpha = 0.05, conf.level = 0.95) 
+```
+
+Next, we try the optimal number of components as 5.
+
+```{r}
+# PLS with R^2 
+N_comp <- 5
+fit_new2 <- plsr(formula = R_sq_train~., data=data.frame(train_data_2),ncomp=N_comp, rescale = F, validation="CV",segment.type=c("consecutive"))
+
+V_pls_train2 <- as.matrix(fit_new2$scores)%*%diag(N_comp)
+
+# Find test factors
+P_pls2 <- fit_new2$projection
+imp_norm <- (imp_test - t(t(rep(1,nrow(imp_test))))%*%t(apply(imp_train,2,mean)))/(t(t(rep(1,nrow(imp_test))))%*%t(apply(imp_train,2,sd)))
+imp_norm <- imp_norm-rep(1,dim(imp_norm)[1])%*%t(fit_new2$Xmeans)
+V_pls_test2 <- as.matrix(imp_norm)%*%as.matrix(P_pls2)
+
+# Normalize factors
+V_norm_train2 <- scale(V_pls_train2,scale=TRUE,center=TRUE)
+V_norm_test2 <- (V_pls_test2-t(t(rep(1,nrow(V_pls_test2))))%*%t(apply(V_pls_train2,2,mean)))/(t(t(rep(1,nrow(V_pls_test2))))%*%t(apply(V_pls_train2,2,sd)))
+
+# Combine training and test
+V_norm2 <- rbind(V_norm_train2,V_norm_test2)
+```
+
+```{r}
+# ADF test for training data
+for(i in 1:N_comp){
+  plot(V_norm2[,i],type='l',xlab='Date',ylab=paste0("PLS factor ",i),main='R^2')
+  print(adf.test(V_norm2[,i],k=10))
+}
+```
+
+The correlation between first and second component of $R$ and $R^2$ are highly correlated. Thus, we use PLS factors from $R^2$ alone in the following model.
+
+```{r}
+# Correlation between latent factors from R and R^2
+for(i in 1:3){
+  print(cor(cbind(V_norm[,i],V_norm2[,i])))
+}
+```
+
+Next, we try the eGARCH model with ged distribution. The in-sample MSE is 0.0001837, while the out-of-sample MSE is 0.0001286. The residuals are independent, and the model passes the coverage test.
+
+```{r}
+# Create lag terms for PLS with R^2
+lags <- 1
+N_train <- nrow(V_norm2)
+
+X_pls_2_all <- V_norm2[(lags+1):N_train,]
+X_pls_1_all <- V_norm[(lags+1):N_train,]
+for(i in 1:lags){
+  if(lags==0){
+    break
+  }else{
+    temp <- V_norm2[(lags+1-i):(N_train-i),]
+    temp2 <- V_norm[(lags+1-i):(N_train-i),]
+    X_pls_2_all <- cbind(X_pls_2_all,temp)
+    X_pls_1_all <- cbind(X_pls_1_all,temp2)
+  }
+}
+
+R_pls2 <- R_pls[(lags+1):N_train]
+
+
+# GARCH
+spec.eGARCH_pls2 <- ugarchspec(variance.model=list(model="eGARCH",
+                    garchOrder=c(1,1),external.regressors = as.matrix(X_pls_2_all[,1:5])), 
+                    mean.model=list(armaOrder = c(1,1),include.mean=FALSE,external.regressors =
+                                      as.matrix(X_pls_1_all)), distribution.model="ged")
+eGARCH_pls2 <- ugarchfit(R_pls2, spec=spec.eGARCH_pls2,out.sample=N_test)
+eGARCH_pls2
+```
+
+```{r}
+# In-sample MSE
+sprintf('In-sample MSE is %g',mean((eGARCH_pls2@fit$residuals*sd(R_train))^2))
+```
+
+```{r}
+# Out-of-sample
+forecast_eGARCH_pls2<-ugarchforecast(eGARCH_pls2, data = R_pls2, n.ahead = 1, n.roll = N_test,out.sample =N_test)
+sigma_eGARCH_pls2<-sigma(forecast_eGARCH_pls2)
+fitted_eGARCH_pls2<-fitted(forecast_eGARCH_pls2)
+sprintf('Out-of-sample MSE is %g',mean(((t(fitted_eGARCH_pls2)-R_pls2[(length(R_pls2)-N_test):length(R_pls2)])*sd(R_train))^2))
+sprintf('Out-of-sample mean of sd is %g',mean(sigma_eGARCH_pls2))
+```
+
+```{r}
+plot(R_all[(length(R_all)-N_test):length(R_all)],type='l',xlab='Date',ylab='Return')
+lines(t(fitted_eGARCH_pls2)*sd(R_train)+mean(R_train),col='blue')
+lines(t(fitted_eGARCH_pls2)*sd(R_train)+mean(R_train)+1.96*t(sigma_eGARCH_pls2)*sd(R_train),col='green')
+lines(t(fitted_eGARCH_pls2)*sd(R_train)+mean(R_train)-1.96*t(sigma_eGARCH_pls2)*sd(R_train),col='green')
+```
+
+```{r}
+# Autocorrelaiton and heteroscedasticity for residuals
+Box.test(eGARCH_pls2@fit$residuals, lag = 10, type = "Ljung")
+Box.test(eGARCH_pls2@fit$residuals^2, lag = 10, type = "Ljung")
+```
+
+```{r}
+# Coverage test
+roll_GARCH_pls2<-ugarchroll(spec=spec.eGARCH_pls2, data=R_pls2, n.ahead=1, forecast.length=N_test, refit.every=253, solver='hybrid', fit.control = list(stationarity = 1), calculate.VaR=TRUE, VaR.alpha=0.05, keep.coef=TRUE)
+report(roll_GARCH_pls2, type="VaR", VaR.alpha = 0.05, conf.level = 0.95) 
+```
+
+Next, we use gjrGARCH with std distribution. The in-sample MSE is 0.0001839, while the out-of-sample MSE is 0.0001189. The residuals are independent, and the model passes the coverage test. The main problem of this model is that the coefficients of latent factors in variance model is insignificant.
+
+```{r}
+lags <- 2
+N_train <- nrow(V_norm2)
+
+X_pls_2_all <- V_norm2[(lags+1):N_train,]
+X_pls_1_all <- V_norm[(lags+1):N_train,]
+for(i in 1:lags){
+  if(lags==0){
+    break
+  }else{
+    temp <- V_norm2[(lags+1-i):(N_train-i),]
+    temp2 <- V_norm[(lags+1-i):(N_train-i),]
+    X_pls_2_all <- cbind(X_pls_2_all,temp)
+    X_pls_1_all <- cbind(X_pls_1_all,temp2)
+  }
+}
+
+
+R_pls2 <- R_pls[(lags+1):N_train]
+
+
+# GARCH
+spec.gjrGARCH_pls2 <- ugarchspec(variance.model=list(model="gjrGARCH",
+                            garchOrder=c(1,1),external.regressors = as.matrix(X_pls_2_all[,1:5])), 
+                            mean.model=list(armaOrder = c(1,1),include.mean=FALSE,
+                                            external.regressors = 
+                                              as.matrix(X_pls_1_all)), 
+                            distribution.model="std")
+gjrGARCH_pls2 <- ugarchfit(R_pls2, spec=spec.gjrGARCH_pls2,out.sample=N_test)
+gjrGARCH_pls2
+```
+
+```{r}
+# In-sample MSE
+sprintf('In-sample MSE is %g',mean((gjrGARCH_pls2@fit$residuals*sd(R_train))^2))
+```
+
+```{r}
+# Out-of-sample
+forecast_gjrGARCH_pls2<-ugarchforecast(gjrGARCH_pls2, data = R_pls2, n.ahead = 1, n.roll = N_test,out.sample =N_test)
+sigma_gjrGARCH_pls2<-sigma(forecast_gjrGARCH_pls2)
+fitted_gjrGARCH_pls2<-fitted(forecast_gjrGARCH_pls2)
+sprintf('Out-of-sample MSE is %g',mean(((t(fitted_gjrGARCH_pls2)-R_pls2[(length(R_pls2)-N_test):length(R_pls2)])*sd(R_train))^2))
+sprintf('Out-of-sample mean of sd is %g',mean(sigma_gjrGARCH_pls2))
+```
+
+```{r}
+plot(R_all[(length(R_all)-N_test):length(R_all)],type='l')
+lines(t(fitted_gjrGARCH_pls2)*sd(R_train)+mean(R_train),col='blue')
+lines(t(fitted_gjrGARCH_pls2)*sd(R_train)+mean(R_train)+1.96*t(sigma_gjrGARCH_pls2)*sd(R_train),col='green')
+lines(t(fitted_gjrGARCH_pls2)*sd(R_train)+mean(R_train)-1.96*t(sigma_gjrGARCH_pls2)*sd(R_train),col='green')
+```
+
+```{r}
+# QQplot, autocorrelation, and heteroscedasticity for residuals
+Pacf(gjrGARCH_pls2@fit$residuals)
+Acf(gjrGARCH_pls2@fit$residuals)
+Box.test(gjrGARCH_pls2@fit$residuals, lag = 10, type = "Ljung")
+Box.test(gjrGARCH_pls2@fit$residuals^2, lag = 10, type = "Ljung")
+```
+
+```{r}
+# Coverage test
+roll_GARCH_pls2<-ugarchroll(spec=spec.gjrGARCH_pls2, data=R_pls2, n.ahead=1, forecast.length=N_test, refit.every=253, solver='hybrid', fit.control = list(stationarity = 1), calculate.VaR=TRUE, VaR.alpha=0.05, keep.coef=TRUE)
+report(roll_GARCH_pls2, type="VaR", VaR.alpha = 0.05, conf.level = 0.95) 
+```
+
+### DCC VAR for PLS factors
+
+From ACF and PACF, for PLS factors from \$R\$, each series follows AR(2). For factors from $R^2$, except factor 3, they follow AR(2) as well.
+
+```{r}
+library(vars)
+library(rmgarch)
+library(MTS)
+
+# Plot ACF and PACF for factors
+for(i in 1:ncol(V_norm)){
+  Acf(V_norm[,i])
+  Pacf(V_norm[,i])
+}
+```
+
+```{r}
+for(i in 1:ncol(V_norm2)){
+  Acf(V_norm2[,i])
+  Pacf(V_norm2[,i])
+}
+```
+
+From VARselect, we conclude that the optimal lag for VAR model is 2 for both factors from $R$ and $R^2$.
+
+```{r}
+# Select optimal AR lag for factors from R
+VARselect(V_norm,lag.max=10,type="none")
+```
+
+```{r}
+# Select optimal AR lag for factors from R^2
+VARselect(V_norm2,lag.max=10,type="none")
+```
+
+However, the residuals of VAR(2) model do not pass the ARCH-LM test, so they have heteroscedasticity.
+
+```{r}
+# VAR model for R
+VAR_pls <- vars::VAR(V_norm,p=2,type="none")
+summary(VAR_pls)
+```
+
+```{r}
+# Residual check
+arch.test(VAR_pls)
+```
+
+```{r}
+# VAR model for R^2
+VAR_pls2 <- vars::VAR(V_norm2,p=2,type="none")
+summary(VAR_pls2)
+```
+
+```{r}
+# Residual check
+arch.test(VAR_pls2)
+```
+
+The optimal model for factors from both $R$ and $R^2$ is DCC(1,1)+VAR(2). It passes the ARCH-LM test and Ljung-Box test for residuals.
+
+```{r}
+# Model for R
+xspec_pls_1 <- ugarchspec(mean.model = list(armaOrder = c(2, 0),include.mean=TRUE), variance.model = list(garchOrder = c(1,1), model = 'eGARCH'), distribution.model = 'std')
+xspec_pls_2 <- ugarchspec(mean.model = list(armaOrder = c(2, 0),include.mean=TRUE), variance.model = list(garchOrder = c(1,1), model = 'eGARCH'), distribution.model = 'std')
+xspec_pls_3 <- ugarchspec(mean.model = list(armaOrder = c(2, 0),include.mean=TRUE), variance.model = list(garchOrder = c(1,1), model = 'eGARCH'), distribution.model = 'std')
+uspec_pls <- multispec(c(xspec_pls_1, xspec_pls_2, xspec_pls_3))
+spec1_pls <- dccspec(uspec = uspec_pls, VAR=TRUE, robust=TRUE,lag=2, dccOrder = c(1,1), model="DCC", distribution = 'mvt')
+fit_pls <- dccfit(spec1_pls, data = V_norm, fit.control = list(eval.se = TRUE), out.sample=N_test)
+fit_pls
+fit_pls@model$varcoef
+```
+
+```{r}
+# In-sample
+print('In-sample MSEs are')
+apply(fit_pls@model$residuals^2,2,mean)
+```
+
+```{r}
+forcast_dcc_pls <- dccforecast(fit_pls,n.ahead=1,n.roll=N_test)
+fitted_pls <- t(fitted(forcast_dcc_pls)[1,,])
+sigma_pls <- t(sigma(forcast_dcc_pls)[1,,])
+mse_pls_temp <- (fitted_pls-V_norm[(nrow(V_norm)-N_test):nrow(V_norm),])^2
+print('MSEs are')
+apply(mse_pls_temp,2,mean)
+print('Means of sd are')
+apply(sigma_pls,2,mean)
+```
+
+```{r}
+# Multivariate Ljung Box test for residuals
+res_pls <- fit_pls@mfit$stdresid
+mq(res_pls,lag=10,adj=2)
+```
+
+```{r}
+# Multi-variate ARCH LM test for residuals
+MarchTest(res_pls,lag=10)
+```
+
+```{r}
+# Model for R^2
+xspec_pls_1 <- ugarchspec(mean.model = list(armaOrder = c(2, 0),include.mean=TRUE), variance.model = list(garchOrder = c(1,1), model = 'eGARCH'), distribution.model = 'std')
+xspec_pls_2 <- ugarchspec(mean.model = list(armaOrder = c(2, 0),include.mean=TRUE), variance.model = list(garchOrder = c(1,1), model = 'eGARCH'), distribution.model = 'std')
+xspec_pls_3 <- ugarchspec(mean.model = list(armaOrder = c(2, 0),include.mean=TRUE), variance.model = list(garchOrder = c(1,1), model = 'eGARCH'), distribution.model = 'std')
+xspec_pls_4 <- ugarchspec(mean.model = list(armaOrder = c(2, 0),include.mean=TRUE), variance.model = list(garchOrder = c(1,1), model = 'eGARCH'), distribution.model = 'std')
+xspec_pls_5 <- ugarchspec(mean.model = list(armaOrder = c(2, 0),include.mean=TRUE), variance.model = list(garchOrder = c(1,1), model = 'eGARCH'), distribution.model = 'std')
+uspec_pls2 <- multispec(c(xspec_pls_1, xspec_pls_2, xspec_pls_3,xspec_pls_4,xspec_pls_5))
+spec1_pls2 <- dccspec(uspec = uspec_pls2, VAR=TRUE, robust=TRUE,lag=2, dccOrder = c(1,1), model="DCC", distribution = 'mvt')
+fit_pls2 <- dccfit(spec1_pls2, data = V_norm2, fit.control = list(eval.se = TRUE), out.sample=N_test)
+fit_pls2
+fit_pls2@model$varcoef
+```
+
+```{r}
+# In-sample
+print('In-sample MSEs are')
+apply(fit_pls2@model$residuals^2,2,mean)
+```
+
+```{r}
+# Out-of-sample
+forcast_dcc_pls2 <- dccforecast(fit_pls2,n.ahead=1,n.roll=N_test)
+fitted_pls2 <- t(fitted(forcast_dcc_pls2)[1,,])
+sigma_pls2 <- t(sigma(forcast_dcc_pls2)[1,,])
+mse_pls_temp2 <- (fitted_pls2-V_norm2[(nrow(V_norm2)-N_test):nrow(V_norm2),])^2
+print('MSEs are')
+apply(mse_pls_temp2,2,mean)
+print('Means of sd are')
+apply(sigma_pls2,2,mean)
+```
+
+```{r}
+# Multivariate Ljung Box test for residuals
+res_pls2 <- fit_pls2@mfit$stdresid
+mq(res_pls2,lag=10,adj=2)
+```
+
+```{r}
+# Multi-variate ARCH LM test for residuals
+MarchTest(res_pls2,lag=10)
+```
+
+## Cohen's factors
+
+```{r}
+rm(list=ls())
+library(rugarch)
+library(car)
+library(tseries)
+library(Dowd)
+library(seastests)
+library(vars)
+
+# import data
+Data_co <- read.csv("/Users/benjye/Dropbox/Pricing/Data_R/Data_co.csv",header=TRUE)
+X_co <- Data_co[,2:3]
+S <- Data_co[,4]
+R <- diff(log(S))
+S <- S[-length(S)]
+X_co <- X_co[-nrow(X_co),]
+```
+
+The factors are both stationary,
+
+```{r}
+# ADF test for factors
+adf.test(X_co[,1],k=10)
+adf.test(X_co[,2],k=10)
+```
+
+```{r}
+# Normalize data
+N_test <- 1000
+start <- 1767
+S_train <- S[start:(length(S)-N_test)]
+S_test <- S[(length(S)-N_test+1):length(S)]
+R_train <- R[start:(length(R)-N_test)]
+R_test <- R[(length(R)-N_test+1):length(R)]
+X_co_train <- X_co[start:(nrow(X_co)-N_test),]
+X_co_test <- X_co[(nrow(X_co)-N_test+1):nrow(X_co),]
+
+S_train_norm <- (S_train-mean(S_train))/sd(S_train)
+S_test_norm <- (S_test-mean(S_train))/sd(S_train)
+R_train_norm <- (R_train-mean(R_train))/sd(R_train)
+R_test_norm <- (R_test-mean(R_train))/sd(R_train)
+X_co_train_1 <- (X_co_train[,1]-mean(X_co_train[,1]))/sd(X_co_train[,1])
+X_co_test_1 <- (X_co_test[,1]-mean(X_co_train[,1]))/sd(X_co_train[,1])
+X_co_train_2 <- (X_co_train[,2]-mean(X_co_train[,2]))/sd(X_co_train[,2])
+X_co_test_2 <- (X_co_test[,2]-mean(X_co_train[,2]))/sd(X_co_train[,2])
+```
+
+```{r}
+# Plot R vs X_co
+plot(X_co_train_1,R_train_norm,main='R vs X_1')
+lm_2 <- lm(R_train_norm~poly(X_co_train_1,2))
+abline(lm_2,col='blue')
+plot(X_co_train_2,R_train_norm,main='R vs X_2')
+lm_3 <- lm(R_train_norm~poly(X_co_train_2,2))
+abline(lm_3,col='blue')
+```
+
+The estimation is better in the test data since it has less abnormal data points.
+
+```{r}
+plot(R[1:(length(R)-N_test)],type='l',xlab='Date',ylab='R_t',main='Training data')
+plot(R[(length(R)-N_test+1):length(R)],type='l',xlab='Date',ylab='R_t',main='Test data')
+```
+
+We first try the standard GARCH model on the data. However, it does not eliminate the autocorrelation in the residuals and the residuals are not normal. However, it does not pass the coverage test.
+
+```{r}
+# sGARCH model
+X_train <- cbind(X_co_train_1,X_co_train_2)
+X_test <- cbind(X_co_test_1,X_co_test_2)
+X_all <- rbind(X_train,X_test)
+R_all <- c(R_train_norm,R_test_norm)
+S_all <- c(S_train_norm,S_test_norm)
+
+spec.GARCH_sim <- ugarchspec(variance.model=list(model="sGARCH", 
+                garchOrder=c(0,1)), mean.model=list(armaOrder = c(0,0),include.mean=FALSE), 
+                distribution.model="norm")
+GARCH_sim <- ugarchfit(R_all, spec=spec.GARCH_sim,out.sample = N_test)
+GARCH_sim
+```
+
+```{r}
+# In-sample MSE
+sprintf('In-sample MSE is %g',mean((GARCH_sim@fit$fitted.values*sd(R_train)+mean(R_train)-R_train)^2))
+```
+
+```{r}
+forecast_sim<-ugarchforecast(GARCH_sim, data = R, n.ahead = 1, n.roll = N_test,out.sample =N_test)
+sigma_sim<-sigma(forecast_sim)
+fitted_sim<-fitted(forecast_sim)
+sprintf('Out-of-sample MSE is %g',mean((forecast_sim@forecast$seriesFor*sd(R_train)+mean(R_train)-R[(length(R)-N_test):length(R)])^2))
+```
+
+```{r}
+plot(R[(length(R)-N_test):length(R)],type='l')
+lines(t(fitted_sim)*sd(R_train)+mean(R_train),col='blue')
+lines(t(fitted_sim)*sd(R_train)+mean(R_train)+1.96*t(sigma_sim)*sd(R_train),col='green')
+lines(t(fitted_sim)*sd(R_train)+mean(R_train)-1.96*t(sigma_sim)*sd(R_train),col='green')
+```
+
+```{r}
+# Coverage test
+roll_sim<-ugarchroll(spec=spec.GARCH_sim, data=R, n.ahead=1, forecast.length=N_test, refit.every=253, solver='hybrid', fit.control = list(stationarity = 1), calculate.VaR=TRUE, VaR.alpha=0.05, keep.coef=TRUE)
+report(roll_sim, type="VaR", VaR.alpha = 0.05, conf.level = 0.95) 
+```
+
+```{r}
+# Residual check
+Box.test(GARCH_sim@fit$residuals^2, lag = 10, type = "Ljung")
+jarque.bera.test(GARCH_sim@fit$residuals)
+```
+
+Next, we add the latent factors to the model. In-sample MSE is 0.0001855, while out-of-sample MSE is 0.0001367. However, the residuals are not normal and are heteroscedastic. It passes the coverage test.
+
+```{r}
+lags <- 0
+N_train <- nrow(X_all)
+X_co_1_all <- X_all[(lags+1):N_train,1]
+X_co_2_all <- X_all[(lags+1):N_train,2]
+for(i in 1:lags){
+  if(lags==0){
+    break
+  }else{
+    temp_1 <- X_all[(lags+1-i):(N_train-i),1]
+    temp_2 <- X_all[(lags+1-i):(N_train-i),2]
+  
+    X_co_1_all <- cbind(X_co_1_all,temp_1)
+    X_co_2_all <- cbind(X_co_2_all,temp_2)
+  }
+}
+
+
+R_co <- R_all[(lags+1):N_train]
+X_train_new <- cbind(as.matrix(X_co_1_all),as.matrix(X_co_2_all))
+
+# gjrGARCH
+spec.GARCH_1 <- ugarchspec(variance.model=list(model="sGARCH", 
+                            garchOrder=c(1,1),external.regressors = as.matrix(X_train_new)), 
+                            mean.model=list(armaOrder = c(0,0),include.mean=TRUE,
+                                            external.regressors = as.matrix(X_train_new)), 
+                            distribution.model="norm")
+sGARCH <- ugarchfit(R_co, spec=spec.GARCH_1,out.sample=N_test)
+sGARCH
+```
+
+```{r}
+# In-sample
+sprintf('In-sample MSE is %g',mean((sGARCH@fit$residuals*sd(R_train))^2))
+```
+
+```{r}
+plot(R[(length(R)-N_test):length(R)],type='l')
+lines(t(fitted_GARCH1)*sd(R_train)+mean(R_train),col='blue')
+lines(t(fitted_GARCH1)*sd(R_train)+mean(R_train)+1.96*t(sigma_GARCH1)*sd(R_train),col='green')
+lines(t(fitted_GARCH1)*sd(R_train)+mean(R_train)-1.96*t(sigma_GARCH1)*sd(R_train),col='green')
+```
+
+```{r}
+# Out-of-sample
+forecast_GARCH1<-ugarchforecast(sGARCH, data = R_co, n.ahead = 1, n.roll = N_test,out.sample =N_test)
+sigma_GARCH1<-sigma(forecast_GARCH1)
+fitted_GARCH1<-fitted(forecast_GARCH1)
+
+sprintf('Out-of-sample MSE is %g',mean((t(fitted_GARCH1)*sd(R_train)+mean(R_train)-R[(length(R)-N_test):length(R)])^2))
+sprintf('Out-of-sample mean of sd is %g',mean(sigma_GARCH1))
+```
+
+```{r}
+# Residual check
+qqnorm(sGARCH@fit$residuals)
+qqline(sGARCH@fit$residuals,lwd = 2)
+jarque.bera.test(sGARCH@fit$residuals)
+Box.test(sGARCH@fit$residuals, lag = 10, type = "Ljung")
+Box.test(sGARCH@fit$residuals^2, lag = 10, type = "Ljung")
+```
+
+```{r}
+# Coverage test
+roll_GARCH<-ugarchroll(spec=spec.GARCH_1, data=R_co, n.ahead=1, forecast.length=N_test, refit.every=253, solver='hybrid', fit.control = list(stationarity = 1), calculate.VaR=TRUE, VaR.alpha=0.05, keep.coef=TRUE)
+report(roll_GARCH, type="VaR", VaR.alpha = 0.05, conf.level = 0.95) 
+```
+
+Finally, we add lags into the model. In-sample MSE is 0.0001842, while the out-of-sample MSE is 0.0001291. It passes the coverage test.
+
+```{r}
+# Create external regressor with lags
+lags <- 1
+N_train <- nrow(X_all)
+X_co_1_all <- X_all[(lags+1):N_train,1]
+X_co_2_all <- X_all[(lags+1):N_train,2]
+for(i in 1:lags){
+  if(lags==0){
+    break
+  }else{
+    temp_1 <- X_all[(lags+1-i):(N_train-i),1]
+    temp_2 <- X_all[(lags+1-i):(N_train-i),2]
+  
+    X_co_1_all <- cbind(X_co_1_all,temp_1)
+    X_co_2_all <- cbind(X_co_2_all,temp_2)
+  }
+}
+
+
+R_co <- R_all[(lags+1):N_train]
+X_train_new <- cbind(as.matrix(X_co_1_all),as.matrix(X_co_2_all))
+
+# eGARCH
+spec.gjrGARCH <- ugarchspec(variance.model=list(model="eGARCH", 
+                            garchOrder=c(2,2),external.regressors = as.matrix(X_train_new)), 
+                            mean.model=list(armaOrder = c(1,1),include.mean=FALSE,
+                                            external.regressors = as.matrix(X_train_new)), 
+                            distribution.model="std")
+gjrGARCH <- ugarchfit(R_co, spec=spec.gjrGARCH,out.sample=N_test)
+gjrGARCH
+```
+
+```{r}
+# In-sample mse
+sprintf('In-sample MSE is %g',mean((gjrGARCH@fit$residuals*sd(R_train))^2))
+```
+
+```{r}
+# Out-of-sample
+forecast_gjrGARCH<-ugarchforecast(gjrGARCH, data = R_co, n.ahead = 1, n.roll = N_test,out.sample =N_test)
+sigma_gjrGARCH<-sigma(forecast_gjrGARCH)
+fitted_gjrGARCH<-fitted(forecast_gjrGARCH)
+sprintf('Out-of-sample MSE is %g',mean(((t(fitted_gjrGARCH)-R_co[(length(R_co)-N_test):length(R_co)])*sd(R_train))^2))
+sprintf('Out-of-sample mean of sd is %g',mean(sigma_gjrGARCH))
+```
+
+```{r}
+plot(R[(length(R)-N_test):length(R)],type='l')
+lines(t(fitted_gjrGARCH)*sd(R_train)+mean(R_train),col='blue')
+lines(t(fitted_gjrGARCH)*sd(R_train)+mean(R_train)+1.96*t(sigma_gjrGARCH)*sd(R_train),col='green')
+lines(t(fitted_gjrGARCH)*sd(R_train)+mean(R_train)-1.96*t(sigma_gjrGARCH)*sd(R_train),col='green')
+```
+
+```{r}
+# Residual check
+TQQPlot(gjrGARCH@fit$residuals, 9)
+Box.test(gjrGARCH@fit$residuals, lag = 10, type = "Ljung")
+Box.test(gjrGARCH@fit$residuals^2, lag = 10, type = "Ljung")
+```
+
+```{r}
+# Coverage test
+roll_GARCH<-ugarchroll(spec=spec.gjrGARCH, data=R_co, n.ahead=1, forecast.length=N_test, refit.every=253, solver='hybrid', fit.control = list(stationarity = 1), calculate.VaR=TRUE, VaR.alpha=0.05, keep.coef=TRUE)
+report(roll_GARCH, type="VaR", VaR.alpha = 0.05, conf.level = 0.95) 
+```
+
+### DCC VAR for factors
+
+The optimal number of VAR components is 4 by VARselect.
+
+```{r}
+library(rmgarch)
+library(MTS)
+
+# ACF and PACF for factors
+for(i in 1:2){
+  Acf(X_all[,i])
+  Pacf(X_all[,i])
+}
+```
+
+```{r}
+VARselect(X_all,lag.max=10,type="none")
+```
+
+However, if we use VAR(4), its residuals does not pass the ARCH-LM test.
+
+```{r}
+VAR_co <- vars::VAR(X_co,p=4,type="none")
+summary(VAR_co)
+```
+
+```{r}
+# heteroscedasticity test
+arch.test(VAR_co)
+```
+
+The best model is DCC(2,2)+VAR(4). The residuals pass the Ljung-Box and ARCH-LM test.
+
+```{r}
+xspec_co_1 <- ugarchspec(mean.model = list(armaOrder = c(4, 0),include.mean=TRUE), variance.model = list(garchOrder = c(1,1), model = 'eGARCH'), distribution.model = 'std')
+xspec_co_2 <- ugarchspec(mean.model = list(armaOrder = c(4, 0),include.mean=TRUE), variance.model = list(garchOrder = c(1,1), model = 'eGARCH'), distribution.model = 'std')
+uspec_co <- multispec(c(xspec_co_1, xspec_co_2))
+spec1_co <- dccspec(uspec = uspec_co, VAR=TRUE, robust=TRUE,lag=4, dccOrder = c(2,2), model="DCC", distribution = 'mvt')
+fit_co <- dccfit(spec1_co, data = X_all, fit.control = list(eval.se = TRUE), out.sample=N_test)
+fit_co
+fit_co@model$varcoef
+```
+
+```{r}
+# In-sample
+print('In-sample MSEs are')
+apply(fit_co@model$residuals^2,2,mean)
+```
+
+```{r}
+# out-of-sample mse and mean of sd
+forcast_dcc_co <- dccforecast(fit_co,n.ahead=1,n.roll=N_test)
+fitted_co <- t(fitted(forcast_dcc_co)[1,,])
+sigma_co <- t(sigma(forcast_dcc_co)[1,,])
+mse_co_temp <- (fitted_co-X_co[(nrow(X_co)-N_test):nrow(X_co),])^2
+print('MSEs are')
+apply(mse_co_temp,2,mean)
+print('Means of sd are')
+apply(sigma_co,2,mean)
+```
+
+```{r}
+# Ljung-Box test
+res_co <- fit_co@mfit$stdresid
+mq(res_co,lag=10,adj=4)
+```
+
+```{r}
+# ARCH-LM test
+MarchTest(res_co,lag=10)
+```
